@@ -1,52 +1,133 @@
-import { useRef, useState } from 'react'
-import { OPENINGS } from '../data/openings'
+import { useMemo, useRef, useState } from 'react'
+import { CURATED, DB_INFO, FAMILIES, withSide } from '../data/catalog'
+import Icon from '../Icon'
+import { ENGINE_NAME } from '../lib/engine'
 import { importPgn } from '../lib/pgn'
-import { allOpenings, createRepertoire, exportData, importData, lineKey, useStore } from '../lib/store'
+import type { Progress } from '../lib/srs'
+import { createRepertoire, exportData, importData, learnedLines, useStore } from '../lib/store'
 import type { Line, Opening, Side } from '../lib/types'
 
-function OpeningCard({ o, onOpen }: { o: Opening; onOpen: (id: string) => void }) {
-  const { progress } = useStore()
+interface Tally {
+  learned: number
+  due: number
+}
+
+/** Zählt gelernte und fällige Linien je Eröffnung. */
+function tally(progress: Record<string, Progress>): Map<string, Tally> {
   const now = Date.now()
-  const states = o.lines.map((l) => progress[lineKey(o, l)])
-  const learned = states.filter(Boolean).length
-  const due = states.filter((p) => p && p.due <= now).length
+  const map = new Map<string, Tally>()
+  for (const [key, p] of Object.entries(progress)) {
+    const id = key.slice(0, key.indexOf('/'))
+    const t = map.get(id) ?? { learned: 0, due: 0 }
+    t.learned++
+    if (p.due <= now) t.due++
+    map.set(id, t)
+  }
+  return map
+}
+
+interface CardProps {
+  o: Opening
+  t: Tally | undefined
+  note?: string
+  onOpen: () => void
+}
+
+function OpeningCard({ o, t, note, onOpen }: CardProps) {
+  const learned = t?.learned ?? 0
   return (
     <li className="card">
-      <button className="card-main" onClick={() => onOpen(o.id)}>
+      <button className="card-main" onClick={onOpen}>
         <span className="card-title">
           {o.name}
-          {due > 0 && <span className="pill due">{due} fällig</span>}
+          {t && t.due > 0 && <span className="pill due">{t.due} fällig</span>}
         </span>
         <span className="card-sub">
-          {o.lines.length} {o.lines.length === 1 ? 'Linie' : 'Linien'} · {learned} gelernt
+          {[o.intl, `${o.lines.length} ${o.lines.length === 1 ? 'Linie' : 'Linien'}`, learned ? `${learned} gelernt` : '']
+            .filter(Boolean)
+            .join(' · ')}
         </span>
-        <span className="meter"><i style={{ width: `${o.lines.length ? (learned / o.lines.length) * 100 : 0}%` }} /></span>
+        {note && <span className="card-note">{note}</span>}
+        {learned > 0 && (
+          <span className="meter"><i style={{ width: `${Math.min(100, (learned / o.lines.length) * 100)}%` }} /></span>
+        )}
       </button>
     </li>
   )
 }
 
-export function OpeningsView({ onOpen }: { onOpen: (id: string) => void }) {
+export function OpeningsView({ onOpen }: { onOpen: (id: string, filter?: string) => void }) {
+  const { progress, sides } = useStore()
+  const [query, setQuery] = useState('')
+  const [all, setAll] = useState(false)
+  const tallies = useMemo(() => tally(progress), [progress])
+  const q = query.trim().toLowerCase()
+
+  const card = (base: Opening, hits = 0) => {
+    const o = withSide(base, sides[base.id] ?? base.side)
+    return (
+      <OpeningCard
+        key={base.id}
+        o={o}
+        t={tallies.get(o.id)}
+        note={hits ? `${hits} passende ${hits === 1 ? 'Variante' : 'Varianten'}` : undefined}
+        onOpen={() => onOpen(base.id, hits ? query.trim() : undefined)}
+      />
+    )
+  }
+
+  const results = useMemo(() => {
+    if (!q) return []
+    return [...CURATED, ...FAMILIES]
+      .map((o) => {
+        const head = `${o.name} ${o.intl ?? ''} ${o.eco ?? ''}`.toLowerCase().includes(q)
+        return { o, head, hits: head ? 0 : o.lines.filter((l) => l.name.toLowerCase().includes(q)).length }
+      })
+      .filter((r) => r.head || r.hits)
+      .sort((a, b) => Number(b.head) - Number(a.head) || b.hits - a.hits)
+  }, [q])
+
   return (
     <div className="view">
       <h1>Eröffnungen</h1>
-      <p className="lead">Wähle eine Eröffnung: erst ansehen, dann selbst gegen den Gegner spielen.</p>
-      {(['w', 'b'] as Side[]).map((side) => (
-        <section key={side}>
-          <h2>{side === 'w' ? '♔ Mit Weiß' : '♚ Mit Schwarz'}</h2>
-          <ul className="list">
-            {OPENINGS.filter((o) => o.side === side).map((o) => (
-              <OpeningCard key={o.id} o={o} onOpen={onOpen} />
-            ))}
-          </ul>
-        </section>
-      ))}
+      <p className="lead">
+        {DB_INFO.count.toLocaleString('de-DE')} Linien aus {CURATED.length + FAMILIES.length} Eröffnungen. Erst ansehen, dann selbst spielen.
+      </p>
+      <label className="search">
+        <Icon name="search" size={18} />
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Eröffnung oder Variante suchen" />
+      </label>
+
+      {q ? (
+        <>
+          <h2>{results.length} Treffer</h2>
+          <ul className="list">{results.map((r) => card(r.o, r.hits))}</ul>
+          {results.length === 0 && <p className="muted">Nichts gefunden. Die Varianten tragen ihre internationalen (englischen) Namen.</p>}
+        </>
+      ) : (
+        <>
+          {(['w', 'b'] as Side[]).map((side) => (
+            <section key={side}>
+              <h2>Grundkurse mit {side === 'w' ? 'Weiß' : 'Schwarz'}</h2>
+              <ul className="list">{CURATED.filter((o) => o.side === side).map((o) => card(o))}</ul>
+            </section>
+          ))}
+          <h2>Weitere Eröffnungen</h2>
+          <ul className="list">{(all ? FAMILIES : FAMILIES.slice(0, 8)).map((o) => card(o))}</ul>
+          {!all && (
+            <button className="more" onClick={() => setAll(true)}>
+              Alle {FAMILIES.length} Eröffnungen anzeigen
+            </button>
+          )}
+        </>
+      )}
     </div>
   )
 }
 
 export function RepertoireView({ onOpen }: { onOpen: (id: string) => void }) {
-  const { custom } = useStore()
+  const { custom, progress } = useStore()
+  const tallies = useMemo(() => tally(progress), [progress])
   const [name, setName] = useState('')
   const [side, setSide] = useState<Side>('w')
   const [pgn, setPgn] = useState('')
@@ -72,10 +153,12 @@ export function RepertoireView({ onOpen }: { onOpen: (id: string) => void }) {
   return (
     <div className="view">
       <h1>Mein Repertoire</h1>
-      {custom.length === 0 && <p className="lead">Lege eigene Repertoires an oder importiere sie als PGN (z. B. aus einer Lichess-Studie).</p>}
+      {custom.length === 0 && (
+        <p className="lead">Lege eigene Repertoires an oder importiere sie als PGN, zum Beispiel aus einer Lichess-Studie.</p>
+      )}
       <ul className="list">
         {custom.map((o) => (
-          <OpeningCard key={o.id} o={o} onOpen={onOpen} />
+          <OpeningCard key={o.id} o={o} t={tallies.get(o.id)} onOpen={() => onOpen(o.id)} />
         ))}
       </ul>
 
@@ -83,8 +166,8 @@ export function RepertoireView({ onOpen }: { onOpen: (id: string) => void }) {
       <div className="stack">
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (z. B. Mein Sizilianer)" />
         <div className="segmented" role="group" aria-label="Deine Farbe">
-          <button className={side === 'w' ? 'on' : ''} onClick={() => setSide('w')}>♔ Ich spiele Weiß</button>
-          <button className={side === 'b' ? 'on' : ''} onClick={() => setSide('b')}>♚ Ich spiele Schwarz</button>
+          <button className={side === 'w' ? 'on' : ''} onClick={() => setSide('w')}>Ich spiele Weiß</button>
+          <button className={side === 'b' ? 'on' : ''} onClick={() => setSide('b')}>Ich spiele Schwarz</button>
         </div>
         <button className="primary" onClick={() => onOpen(create().id)}>Leeres Repertoire anlegen</button>
       </div>
@@ -156,39 +239,38 @@ export interface Item {
 export function TrainView({ onStart }: { onStart: (items: Item[]) => void }) {
   const s = useStore()
   const now = Date.now()
-  const learned: (Item & { due: number })[] = []
-  for (const o of allOpenings(s))
-    for (const l of o.lines) {
-      const p = s.progress[lineKey(o, l)]
-      if (p) learned.push({ opening: o, line: l, due: p.due })
-    }
-  learned.sort((a, b) => a.due - b.due)
-  const due = learned.filter((i) => i.due <= now)
-  const next = learned.find((i) => i.due > now)
+  const learned = useMemo(() => learnedLines(s).sort((a, b) => a.progress.due - b.progress.due), [s])
+  const due = learned.filter((i) => i.progress.due <= now)
+  const next = learned.find((i) => i.progress.due > now)
 
   return (
     <div className="view">
       <h1>Training</h1>
       <div className="hero">
         <span className="hero-num">{due.length}</span>
-        <span>{due.length === 1 ? 'Linie ist' : 'Linien sind'} heute fällig</span>
+        <span>{due.length === 1 ? 'Linie ist' : 'Linien sind'} fällig</span>
       </div>
       <div className="stack">
-        <button className="primary" disabled={!due.length} onClick={() => onStart(due)}>Wiederholung starten</button>
+        <button className="primary" disabled={!due.length} onClick={() => onStart(due.slice(0, 20))}>
+          Wiederholung starten
+        </button>
         {learned.length > 0 && (
           <button onClick={() => onStart([...learned].sort(() => Math.random() - 0.5).slice(0, 10))}>
-            Freies Training (zufällige Linien)
+            Freies Training mit zufälligen Linien
           </button>
         )}
       </div>
-      {learned.length === 0 && <p className="lead">Lerne zuerst eine Linie unter „Eröffnungen“ – danach taucht sie hier zur Wiederholung auf.</p>}
+      {learned.length === 0 && (
+        <p className="lead">Lerne zuerst eine Linie unter „Eröffnungen“. Danach taucht sie hier zur Wiederholung auf.</p>
+      )}
       {due.length === 0 && next && (
         <p className="muted">
-          Alles erledigt 🎉 Nächste Wiederholung: {new Date(next.due).toLocaleString('de-DE', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+          Alles erledigt. Nächste Wiederholung:{' '}
+          {new Date(next.progress.due).toLocaleString('de-DE', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
         </p>
       )}
       <p className="muted">
-        Fehlerfreie Linien kommen in immer größeren Abständen wieder (1, 3, 8 … Tage), Linien mit Fehlern schon bald.
+        Fehlerfreie Linien kommen in immer größeren Abständen wieder (1, 3, 8 … Tage), Linien mit Fehlern schon nach wenigen Minuten.
       </p>
     </div>
   )
@@ -197,38 +279,58 @@ export function TrainView({ onStart }: { onStart: (items: Item[]) => void }) {
 export function StatsView() {
   const s = useStore()
   const now = Date.now()
-  const rows = allOpenings(s)
-    .map((o) => {
-      const ps = o.lines.map((l) => s.progress[lineKey(o, l)]).filter(Boolean)
-      const correct = ps.reduce((a, p) => a + p.correct, 0)
-      const wrong = ps.reduce((a, p) => a + p.wrong, 0)
-      return { o, learned: ps.length, due: ps.filter((p) => p.due <= now).length, correct, wrong }
-    })
-  const total = rows.reduce((a, r) => a + r.o.lines.length, 0)
-  const learned = rows.reduce((a, r) => a + r.learned, 0)
-  const correct = rows.reduce((a, r) => a + r.correct, 0)
-  const wrong = rows.reduce((a, r) => a + r.wrong, 0)
+  const rows = useMemo(() => {
+    const map = new Map<string, { o: Opening; learned: number; due: number; correct: number; wrong: number }>()
+    for (const { opening, progress } of learnedLines(s)) {
+      const r = map.get(opening.id) ?? { o: opening, learned: 0, due: 0, correct: 0, wrong: 0 }
+      r.learned++
+      if (progress.due <= now) r.due++
+      r.correct += progress.correct
+      r.wrong += progress.wrong
+      map.set(opening.id, r)
+    }
+    return [...map.values()].sort((a, b) => b.learned - a.learned)
+  }, [s])
+  const sum = (f: (r: (typeof rows)[number]) => number) => rows.reduce((a, r) => a + f(r), 0)
   const acc = (c: number, w: number) => (c + w ? `${Math.round((c / (c + w)) * 100)} %` : '–')
 
   return (
     <div className="view">
       <h1>Statistik</h1>
       <div className="tiles">
-        <div><b>{learned}</b><span>von {total} Linien gelernt</span></div>
-        <div><b>{rows.reduce((a, r) => a + r.due, 0)}</b><span>fällig</span></div>
-        <div><b>{acc(correct, wrong)}</b><span>Trefferquote</span></div>
+        <div><b>{sum((r) => r.learned)}</b><span>{sum((r) => r.learned) === 1 ? 'Linie' : 'Linien'} gelernt</span></div>
+        <div><b>{sum((r) => r.due)}</b><span>fällig</span></div>
+        <div><b>{acc(sum((r) => r.correct), sum((r) => r.wrong))}</b><span>Trefferquote</span></div>
       </div>
       <h2>Nach Eröffnung</h2>
       <ul className="list">
-        {rows.filter((r) => r.learned > 0).map((r) => (
+        {rows.map((r) => (
           <li key={r.o.id} className="card pad">
-            <span className="card-title">{r.o.name}<span className="pill">{acc(r.correct, r.wrong)}</span></span>
-            <span className="card-sub">{r.learned} von {r.o.lines.length} Linien gelernt · {r.due} fällig</span>
-            <span className="meter"><i style={{ width: `${(r.learned / r.o.lines.length) * 100}%` }} /></span>
+            <span className="card-title">
+              {r.o.name}
+              <span className="pill">{acc(r.correct, r.wrong)}</span>
+            </span>
+            <span className="card-sub">
+              {r.o.custom ? '' : `mit ${r.o.side === 'w' ? 'Weiß' : 'Schwarz'} · `}
+              {r.learned} von {r.o.lines.length} Linien gelernt · {r.due} fällig
+            </span>
+            <span className="meter"><i style={{ width: `${Math.min(100, (r.learned / r.o.lines.length) * 100)}%` }} /></span>
           </li>
         ))}
       </ul>
-      {learned === 0 && <p className="lead">Noch keine Daten – sobald du Linien spielst, siehst du hier deinen Fortschritt.</p>}
+      {rows.length === 0 && <p className="lead">Noch keine Daten. Sobald du Linien spielst, siehst du hier deinen Fortschritt.</p>}
+
+      <h2>Quellen und Lizenzen</h2>
+      <p className="muted">
+        Eröffnungsdaten: {DB_INFO.count.toLocaleString('de-DE')} Linien aus{' '}
+        <a href="https://github.com/lichess-org/chess-openings" target="_blank" rel="noreferrer">lichess-org/chess-openings</a> (CC0).
+        Kurze Linien sind mit Stockfish fortgesetzt und alle Schlussstellungen bewertet ({DB_INFO.engine}).
+      </p>
+      <p className="muted">
+        Analyse: {ENGINE_NAME} als{' '}
+        <a href="https://github.com/nmrugg/stockfish.js" target="_blank" rel="noreferrer">Stockfish.js</a>, lizenziert unter der{' '}
+        <a href="engine/COPYING.txt" target="_blank" rel="noreferrer">GNU GPL v3</a>. Die Engine rechnet auf deinem Gerät.
+      </p>
     </div>
   )
 }
