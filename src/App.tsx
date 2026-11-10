@@ -1,17 +1,20 @@
 import { useEffect, useState } from 'react'
-import { allOpenings, useStore } from './lib/store'
-import type { Line } from './lib/types'
+import AnalysisBoard from './Analysis'
+import { findOpening } from './data/catalog'
+import Icon, { type IconName } from './Icon'
+import { useStore } from './lib/store'
 import Trainer from './Trainer'
 import { OpeningsView, RepertoireView, StatsView, TrainView, type Item } from './views/Lists'
 import OpeningDetail from './views/OpeningDetail'
 
-type Tab = 'openings' | 'repertoire' | 'train' | 'stats'
+type Tab = 'openings' | 'repertoire' | 'train' | 'analysis' | 'stats'
 
-const TABS: { id: Tab; icon: string; label: string }[] = [
-  { id: 'openings', icon: '♞', label: 'Eröffnungen' },
-  { id: 'repertoire', icon: '✎', label: 'Repertoire' },
-  { id: 'train', icon: '↻', label: 'Training' },
-  { id: 'stats', icon: '▤', label: 'Statistik' },
+const TABS: { id: Tab; icon: IconName; label: string }[] = [
+  { id: 'openings', icon: 'book', label: 'Eröffnungen' },
+  { id: 'repertoire', icon: 'bookmark', label: 'Repertoire' },
+  { id: 'train', icon: 'repeat', label: 'Training' },
+  { id: 'analysis', icon: 'engine', label: 'Analyse' },
+  { id: 'stats', icon: 'stats', label: 'Statistik' },
 ]
 
 interface Session {
@@ -23,11 +26,12 @@ interface Session {
 export default function App() {
   const store = useStore()
   const [tab, setTab] = useState<Tab>('openings')
-  const [openId, setOpenId] = useState<string | null>(null)
+  const [open, setOpen] = useState<{ id: string; filter?: string } | null>(null)
   const [session, setSession] = useState<Session | null>(null)
+  const [draft, setDraft] = useState<string[]>([])
   useEffect(() => {
     window.scrollTo(0, 0)
-  }, [tab, openId, session?.index, session === null])
+  }, [tab, open?.id, session?.index, session === null])
   const now = Date.now()
   const dueCount = Object.values(store.progress).filter((p) => p.due <= now).length
 
@@ -47,29 +51,32 @@ export default function App() {
     )
   }
 
-  const opening = openId ? allOpenings(store).find((o) => o.id === openId) : undefined
+  const opening = open ? findOpening(store.custom, open.id) : undefined
   if (opening) {
     return (
       <OpeningDetail
+        key={opening.id}
         opening={opening}
-        onBack={() => setOpenId(null)}
-        onStart={(lines: Line[], start) =>
-          setSession({ items: lines.map((line) => ({ opening, line })), index: 0, start })
-        }
+        initialFilter={open?.filter}
+        onBack={() => setOpen(null)}
+        onStart={(o, lines, start) => setSession({ items: lines.map((line) => ({ opening: o, line })), index: 0, start })}
       />
     )
   }
 
   return (
     <>
-      {tab === 'openings' && <OpeningsView onOpen={setOpenId} />}
-      {tab === 'repertoire' && <RepertoireView onOpen={setOpenId} />}
+      {tab === 'openings' && <OpeningsView onOpen={(id, filter) => setOpen({ id, filter })} />}
+      {tab === 'repertoire' && <RepertoireView onOpen={(id) => setOpen({ id })} />}
       {tab === 'train' && <TrainView onStart={(items) => setSession({ items, index: 0, start: 'play' })} />}
+      {tab === 'analysis' && (
+        <AnalysisBoard title="Analysebrett" subtitle="Freies Brett mit Stockfish" initialMoves={draft} orientation="w" onChange={setDraft} withTabs />
+      )}
       {tab === 'stats' && <StatsView />}
       <nav className="tabs">
         {TABS.map((t) => (
           <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => setTab(t.id)}>
-            <span className="tab-icon">{t.icon}</span>
+            <Icon name={t.icon} size={22} />
             {t.label}
             {t.id === 'train' && dueCount > 0 && <span className="badge">{dueCount}</span>}
           </button>

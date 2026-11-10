@@ -1,29 +1,14 @@
 import { Chess } from 'chess.js'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import AnalysisBoard, { replay } from './Analysis'
 import Board from './Board'
+import { EnginePanel, EngineToggle, EvalBar, useEngine } from './EnginePanel'
+import Icon from './Icon'
+import { formatCp } from './lib/engine'
 import { german } from './lib/pgn'
 import { dueLabel, gradeFor, review } from './lib/srs'
 import { lineKey, saveProgress, useStore } from './lib/store'
 import type { Line, Opening } from './lib/types'
-
-interface Step {
-  from: string
-  to: string
-  san: string
-}
-
-/** Spielt die Linie einmal durch und liefert alle Stellungen und Züge. */
-export function replay(moves: string[]): { fens: string[]; steps: Step[] } {
-  const chess = new Chess()
-  const fens = [chess.fen()]
-  const steps: Step[] = []
-  for (const m of moves) {
-    const mv = chess.move(m)
-    steps.push({ from: mv.from, to: mv.to, san: mv.san })
-    fens.push(chess.fen())
-  }
-  return { fens, steps }
-}
 
 type Phase = 'watch' | 'play' | 'done'
 
@@ -36,6 +21,12 @@ interface Props {
   hasNext: boolean
   onNext: () => void
   onExit: () => void
+}
+
+const RESULT = {
+  good: { title: 'Fehlerfrei', text: 'Die Linie sitzt.' },
+  hard: { title: 'Fast', text: 'Noch etwas unsicher – die Linie kommt bald wieder.' },
+  again: { title: 'Noch nicht sicher', text: 'Die Linie kommt in wenigen Minuten wieder.' },
 }
 
 export default function Trainer({ opening, line, start, position, hasNext, onNext, onExit }: Props) {
@@ -51,16 +42,19 @@ export default function Trainer({ opening, line, start, position, hasNext, onNex
   const [auto, setAuto] = useState(start === 'watch')
   const [mistakes, setMistakes] = useState(0)
   const [attempts, setAttempts] = useState(0)
+  const [other, setOther] = useState<string | null>(null)
   const [wrong, setWrong] = useState<string>()
+  const [analysing, setAnalysing] = useState(false)
   const saved = useRef(false)
+  const engine = useEngine(fens[ply], phase === 'watch' && !analysing)
 
   // Vorführen: Züge automatisch abspielen
   useEffect(() => {
-    if (phase !== 'watch' || !auto) return
+    if (phase !== 'watch' || !auto || analysing) return
     if (ply >= n) return setAuto(false)
     const t = setTimeout(() => setPly((p) => p + 1), ply === 0 ? 700 : 1100)
     return () => clearTimeout(t)
-  }, [phase, auto, ply, n])
+  }, [phase, auto, ply, n, analysing])
 
   // Abfragen: Gegner zieht automatisch, am Ende wird gespeichert
   useEffect(() => {
@@ -91,6 +85,7 @@ export default function Trainer({ opening, line, start, position, hasNext, onNex
     setAuto(false)
     setMistakes(0)
     setAttempts(0)
+    setOther(null)
   }
 
   function startWatch() {
@@ -103,29 +98,72 @@ export default function Trainer({ opening, line, start, position, hasNext, onNex
     const expected = steps[ply]
     if (from === expected.from && to === expected.to) {
       setAttempts(0)
+      setOther(null)
       setPly(ply + 1)
       return true
     }
-    setMistakes((m) => m + 1)
-    setAttempts((a) => a + 1)
+    // Ein Zug, der in eine andere Variante derselben Eröffnung führt, ist kein Fehler
+    let san = ''
+    try {
+      san = new Chess(fens[ply]).move({ from, to, promotion: 'q' }).san
+    } catch {
+      return false
+    }
+    const sibling = opening.lines.find(
+      (l) => l !== line && l.moves[ply] === san && l.moves.slice(0, ply).every((m, i) => m === line.moves[i]),
+    )
+    if (sibling) {
+      setOther(`${german(san)} gehört zur Variante „${sibling.name}“. Gesucht ist der Zug dieser Linie.`)
+    } else {
+      setOther(null)
+      setMistakes((m) => m + 1)
+      setAttempts((a) => a + 1)
+    }
     setWrong(to)
     return false
   }
 
   function hint() {
     if (attempts < 2) setMistakes((m) => m + 1)
+    setOther(null)
     setAttempts((a) => Math.max(2, a + 1))
+  }
+
+  if (analysing) {
+    return (
+      <AnalysisBoard
+        title="Analyse"
+        subtitle={`${opening.name} · ${line.name}`}
+        initialMoves={line.moves}
+        initialPly={phase === 'done' ? n : ply}
+        orientation={opening.side}
+        onClose={() => setAnalysing(false)}
+      />
+    )
   }
 
   const waiting = phase === 'play' && ply < n && userTurn(ply)
   const expected = waiting ? steps[ply] : undefined
   const shown = phase === 'watch' ? n : ply
   const grade = gradeFor(mistakes)
+  const book = line.book ?? n
+  const sideName = opening.side === 'w' ? 'Weiß' : 'Schwarz'
+
+  let status = 'Der Gegner zieht …'
+  if (waiting) {
+    if (other) status = other
+    else if (attempts === 0) status = 'Du bist am Zug.'
+    else if (attempts === 1) status = 'Das ist nicht der Zug dieser Linie. Versuch es noch einmal.'
+    else if (attempts === 2) status = 'Tipp: Die markierte Figur zieht.'
+    else status = `Der richtige Zug ist ${german(steps[ply].san)}.`
+  }
 
   return (
     <div className="trainer">
       <header className="bar">
-        <button className="icon" onClick={onExit} aria-label="Schließen">✕</button>
+        <button className="icon" onClick={onExit} aria-label="Schließen">
+          <Icon name="close" />
+        </button>
         <div className="bar-title">
           <strong>{opening.name}</strong>
           <span>{line.name}</span>
@@ -140,50 +178,56 @@ export default function Trainer({ opening, line, start, position, hasNext, onNex
         onMove={onMove}
         lastMove={ply > 0 ? steps[ply - 1] : undefined}
         hintSquare={expected && attempts >= 2 ? expected.from : undefined}
-        arrow={expected && attempts >= 3 ? expected : undefined}
+        arrows={expected && attempts >= 3 ? [expected] : phase === 'watch' ? engine.arrows : []}
         wrongSquare={wrong}
+        side={engine.on ? <EvalBar pv={engine.top} orientation={opening.side} /> : undefined}
       />
 
       <div className="moves" aria-label="Zugfolge">
         {steps.slice(0, shown).map((s, i) => (
-          <span key={i} className={'mv' + (i === ply - 1 ? ' cur' : '') + (userTurn(i) ? ' mine' : '')}>
+          <span key={i} className={'mv' + (i === ply - 1 ? ' cur' : '') + (userTurn(i) ? ' mine' : '') + (i >= book ? ' eng' : '')}>
             {i % 2 === 0 && <em>{i / 2 + 1}.</em>}
             {german(s.san)}
           </span>
         ))}
-        {phase === 'play' && ply === 0 && <span className="muted">Zugfolge erscheint beim Spielen</span>}
+        {phase === 'play' && ply === 0 && <span className="muted">Die Zugfolge erscheint beim Spielen.</span>}
       </div>
 
       {phase === 'watch' && (
         <section className="panel">
-          <p className="status">👀 Schau dir die Linie an – du spielst {opening.side === 'w' ? 'Weiß' : 'Schwarz'}.</p>
+          <p className="status">Linie ansehen – du spielst {sideName}.</p>
           {line.idea && <p className="idea">{line.idea}</p>}
+          {!line.idea && line.eval !== undefined && (
+            <p className="muted">
+              {book < n
+                ? `Datenbank bis Zug ${Math.ceil(book / 2)}, danach die Fortsetzung von Stockfish (gepunktet). `
+                : ''}
+              Bewertung der Schlussstellung: {formatCp(line.eval)}
+            </p>
+          )}
           <div className="controls">
-            <button onClick={() => { setAuto(false); setPly(0) }} disabled={ply === 0}>⏮</button>
-            <button onClick={() => { setAuto(false); setPly(Math.max(0, ply - 1)) }} disabled={ply === 0}>◀</button>
-            <button onClick={() => setAuto(!auto && ply < n)} disabled={ply >= n}>{auto ? '⏸' : '▶ Auto'}</button>
-            <button onClick={() => { setAuto(false); setPly(Math.min(n, ply + 1)) }} disabled={ply >= n}>▶</button>
+            <button onClick={() => { setAuto(false); setPly(0) }} disabled={ply === 0} aria-label="Zum Anfang"><Icon name="first" /></button>
+            <button onClick={() => { setAuto(false); setPly(Math.max(0, ply - 1)) }} disabled={ply === 0} aria-label="Zug zurück"><Icon name="prev" /></button>
+            <button onClick={() => setAuto(!auto && ply < n)} disabled={ply >= n} aria-label={auto ? 'Anhalten' : 'Abspielen'}>
+              <Icon name={auto ? 'pause' : 'play'} />
+            </button>
+            <button onClick={() => { setAuto(false); setPly(Math.min(n, ply + 1)) }} disabled={ply >= n} aria-label="Zug vor"><Icon name="next" /></button>
           </div>
           <button className="primary" onClick={startPlay}>Jetzt selbst spielen</button>
+          <EngineToggle />
+          <EnginePanel fen={fens[ply]} engine={engine} />
+          <button onClick={() => { setAuto(false); setAnalysing(true) }}>
+            <Icon name="engine" size={18} /> Stellung frei analysieren
+          </button>
         </section>
       )}
 
       {phase === 'play' && (
         <section className="panel">
-          <p className="status">
-            {waiting
-              ? attempts === 0
-                ? 'Du bist am Zug – spiele den Repertoire-Zug.'
-                : attempts === 1
-                  ? '❌ Das ist nicht der Zug aus der Linie. Versuch es noch einmal.'
-                  : attempts === 2
-                    ? '💡 Diese Figur zieht.'
-                    : `💡 Der richtige Zug ist ${german(steps[ply].san)}.`
-              : 'Der Gegner zieht …'}
-          </p>
+          <p className={'status' + (waiting && !other && attempts === 1 ? ' bad' : '')}>{status}</p>
           <div className="controls">
-            <button onClick={hint} disabled={!waiting || attempts >= 3}>💡 Tipp</button>
-            <button onClick={startWatch}>👀 Nochmal ansehen</button>
+            <button onClick={hint} disabled={!waiting || attempts >= 3}><Icon name="hint" size={18} /> Tipp</button>
+            <button onClick={startWatch}><Icon name="eye" size={18} /> Ansehen</button>
           </div>
           <p className="muted">Fehler: {mistakes}</p>
         </section>
@@ -191,16 +235,16 @@ export default function Trainer({ opening, line, start, position, hasNext, onNex
 
       {phase === 'done' && (
         <section className="panel">
-          <p className="status big">
-            {grade === 'good' ? '🎉 Fehlerfrei!' : grade === 'hard' ? '👍 Fast – noch etwas wackelig.' : '🔁 Die Linie sitzt noch nicht.'}
-          </p>
+          <p className={'status big ' + grade}>{RESULT[grade].title}</p>
           <p className="muted">
-            {mistakes} Fehler bei {userMoves} eigenen Zügen · nächste Wiederholung: {grade === 'again' ? 'in ca. 10 Minuten' : dueLabel(progress)}
+            {mistakes} Fehler bei {userMoves} eigenen Zügen. {RESULT[grade].text}
+            {grade !== 'again' && ` Nächste Wiederholung: ${dueLabel(progress)}.`}
           </p>
           {line.idea && <p className="idea">{line.idea}</p>}
           <div className="controls">
-            <button onClick={startPlay}>Nochmal üben</button>
-            <button onClick={startWatch}>👀 Ansehen</button>
+            <button onClick={startPlay}>Nochmal</button>
+            <button onClick={startWatch}><Icon name="eye" size={18} /> Ansehen</button>
+            <button onClick={() => setAnalysing(true)}><Icon name="engine" size={18} /> Analyse</button>
           </div>
           <button className="primary" onClick={hasNext ? onNext : onExit}>
             {hasNext ? 'Nächste Linie' : 'Fertig'}
