@@ -105,6 +105,7 @@ describe('Stockfish-Ausgabe', () => {
     expect(formatCp(34)).toBe('+0,3')
     expect(formatCp(-152)).toBe('−1,5')
     expect(formatCp(0)).toBe('0,0')
+    expect(formatCp(-3)).toBe('0,0')
     expect(formatScore({ mate: -3, moves: [] })).toBe('−#3')
     expect(whiteShare({ cp: 0, moves: [] })).toBe(50)
     expect(whiteShare({ cp: 300, moves: [] })).toBeGreaterThan(70)

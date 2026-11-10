@@ -56,7 +56,8 @@ export function formatScore(pv: PvLine | undefined): string {
 export function formatCp(cp: number): string {
   if (Math.abs(cp) >= 10000) return cp > 0 ? '#' : '−#'
   const v = (Math.abs(cp) / 100).toFixed(1).replace('.', ',')
-  return cp > 0 ? `+${v}` : cp < 0 ? `−${v}` : '0,0'
+  if (v === '0,0') return v
+  return cp > 0 ? `+${v}` : `−${v}`
 }
 
 type Listener = (a: Analysis) => void
